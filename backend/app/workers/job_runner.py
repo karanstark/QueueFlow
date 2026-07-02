@@ -6,160 +6,233 @@ from sqlalchemy.future import select
 from sqlalchemy import update
 
 from app.config.database import AsyncSessionLocal
-from app.models import Job, JobLog, Worker, DeadLetterQueue
+from app.models import Job, JobLog, Worker, DeadLetterQueue, Queue
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+HEARTBEAT_INTERVAL = 15   # seconds between heartbeats
+POLL_INTERVAL = 5          # seconds between polls
+MAX_CONCURRENT_JOBS = 5    # max jobs this worker runs simultaneously
+
 
 class JobRunner:
     def __init__(self, worker_id: str):
         self.worker_id = worker_id
         self.is_running = False
-        self.poll_interval = 5  # seconds
+        self._active_tasks: set[asyncio.Task] = set()
 
     async def register_worker(self):
         async with AsyncSessionLocal() as session:
-            # Upsert: update if exists, insert if not
             result = await session.execute(select(Worker).filter(Worker.id == self.worker_id))
             existing = result.scalars().first()
+            now = datetime.now(timezone.utc)
             if existing:
                 existing.status = "active"
+                existing.last_heartbeat = now
             else:
-                worker = Worker(id=self.worker_id, name=f"Worker-{self.worker_id[:8]}", status="active")
-                session.add(worker)
+                session.add(Worker(
+                    id=self.worker_id,
+                    name=f"Worker-{self.worker_id[:8]}",
+                    status="active",
+                    last_heartbeat=now,
+                ))
             await session.commit()
             logger.info(f"Worker {self.worker_id} registered.")
 
     async def unregister_worker(self):
         async with AsyncSessionLocal() as session:
             await session.execute(
-                update(Worker).where(Worker.id == self.worker_id).values(status="offline")
+                update(Worker)
+                .where(Worker.id == self.worker_id)
+                .values(status="offline")
             )
             await session.commit()
             logger.info(f"Worker {self.worker_id} unregistered.")
 
+    async def send_heartbeat(self):
+        """Periodically update last_heartbeat timestamp on the worker row."""
+        while self.is_running:
+            try:
+                async with AsyncSessionLocal() as session:
+                    await session.execute(
+                        update(Worker)
+                        .where(Worker.id == self.worker_id)
+                        .values(last_heartbeat=datetime.now(timezone.utc))
+                    )
+                    await session.commit()
+            except Exception as e:
+                logger.warning(f"Heartbeat failed: {e}")
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+
     async def start(self):
         self.is_running = True
         await self.register_worker()
-        logger.info(f"Worker {self.worker_id} started polling.")
+        logger.info(f"Worker {self.worker_id} started.")
 
+        # Run heartbeat and poll loop concurrently
+        await asyncio.gather(
+            self.heartbeat_loop(),
+            self.poll_loop(),
+        )
+
+    async def heartbeat_loop(self):
         while self.is_running:
             try:
-                await self.poll_and_execute()
+                async with AsyncSessionLocal() as session:
+                    await session.execute(
+                        update(Worker)
+                        .where(Worker.id == self.worker_id)
+                        .values(last_heartbeat=datetime.now(timezone.utc))
+                    )
+                    await session.commit()
             except Exception as e:
-                logger.error(f"Error in worker loop: {e}")
-            await asyncio.sleep(self.poll_interval)
+                logger.warning(f"Heartbeat failed: {e}")
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+
+    async def poll_loop(self):
+        while self.is_running:
+            try:
+                # Only pick up more jobs if below concurrency limit
+                if len(self._active_tasks) < MAX_CONCURRENT_JOBS:
+                    await self.poll_and_dispatch()
+            except Exception as e:
+                logger.error(f"Poll error: {e}")
+            await asyncio.sleep(POLL_INTERVAL)
 
     def stop(self):
         self.is_running = False
 
-    async def poll_and_execute(self):
+    async def poll_and_dispatch(self):
+        """Claim one job and dispatch it as a concurrent asyncio task."""
         async with AsyncSessionLocal() as session:
             now = datetime.now(timezone.utc)
 
-            # SQLite-safe polling: select then check/claim manually
+            # Find oldest queued job whose queue is active
             result = await session.execute(
-                select(Job).filter(
+                select(Job)
+                .join(Queue)
+                .filter(
                     Job.status == "queued",
-                    Job.run_at <= now
-                ).limit(1)
+                    Job.run_at <= now,
+                    Queue.status == "active",  # respect paused queues
+                )
+                .order_by(Job.run_at.asc())
+                .limit(1)
             )
             job = result.scalars().first()
-
             if not job:
-                return  # Nothing to do
+                return
 
-            # Claim the job (optimistic lock via status check)
+            # Claim it
             job.status = "claimed"
             job.worker_id = self.worker_id
             job.updated_at = now
-
-            log = JobLog(
+            session.add(JobLog(
                 job_id=job.id,
                 status="claimed",
-                message=f"Job claimed by worker {self.worker_id}"
-            )
-            session.add(log)
+                message=f"Claimed by worker {self.worker_id[:8]}"
+            ))
             await session.commit()
+            job_id = job.id
 
-            logger.info(f"Worker {self.worker_id} claimed job {job.id}")
+        # Dispatch as concurrent task
+        task = asyncio.create_task(self.execute_job(job_id))
+        self._active_tasks.add(task)
+        task.add_done_callback(self._active_tasks.discard)
+        logger.info(f"Dispatched job {job_id} (active: {len(self._active_tasks)})")
 
-        # Execute in a fresh session to avoid long-held transactions
+    async def execute_job(self, job_id: int):
+        """Execute a single claimed job."""
         async with AsyncSessionLocal() as session:
-            result = await session.execute(select(Job).filter(Job.id == job.id))
+            result = await session.execute(select(Job).filter(Job.id == job_id))
             job = result.scalars().first()
             if not job or job.status != "claimed":
-                return  # Another worker grabbed it
+                return
 
+            start_time = datetime.now(timezone.utc)
             try:
                 job.status = "running"
-                session.add(JobLog(job_id=job.id, status="running", message="Job started running"))
+                job.started_at = start_time
+                job.updated_at = start_time
+                session.add(JobLog(
+                    job_id=job.id,
+                    status="running",
+                    message="Job started execution"
+                ))
                 await session.commit()
 
-                # Simulated work
+                # Simulated work (2 seconds)
                 await asyncio.sleep(2)
 
-                # Check for mock failure flag in payload
                 if job.payload and job.payload.get("should_fail"):
-                    raise Exception("Mock simulated failure")
+                    raise Exception("Mock failure triggered by payload flag")
+
+                # Success
+                end_time = datetime.now(timezone.utc)
+                duration = (end_time - start_time).total_seconds() * 1000
 
                 job.status = "completed"
-                job.updated_at = datetime.now(timezone.utc)
-                session.add(JobLog(job_id=job.id, status="completed", message="Job completed successfully"))
+                job.completed_at = end_time
+                job.duration_ms = duration
+                job.updated_at = end_time
+                session.add(JobLog(
+                    job_id=job.id,
+                    status="completed",
+                    message=f"Completed in {duration:.0f}ms"
+                ))
                 await session.commit()
-                logger.info(f"Job {job.id} completed.")
+                logger.info(f"Job {job_id} completed in {duration:.0f}ms")
 
             except Exception as e:
-                logger.error(f"Job {job.id} failed: {e}")
+                logger.error(f"Job {job_id} failed: {e}")
                 await self.handle_failure(session, job, str(e))
 
     async def handle_failure(self, session: AsyncSession, job: Job, error_msg: str):
         job.retry_count += 1
+        now = datetime.now(timezone.utc)
 
         if job.retry_count <= job.max_retries:
-            job.status = "queued"
-            # Calculate retry delay based on strategy
-            if job.retry_strategy == "fixed":
+            # Calculate backoff delay
+            strategy = job.retry_strategy
+            if strategy == "fixed":
                 delay = 10
-            elif job.retry_strategy == "linear":
+            elif strategy == "linear":
                 delay = 10 * job.retry_count
-            elif job.retry_strategy == "exponential":
-                delay = 2 ** job.retry_count
+            elif strategy == "exponential":
+                delay = min(2 ** job.retry_count, 300)  # cap at 5 min
             else:
                 delay = 10
 
-            job.run_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
-            job.updated_at = datetime.now(timezone.utc)
-
+            job.status = "queued"
+            job.run_at = now + timedelta(seconds=delay)
+            job.updated_at = now
             session.add(JobLog(
                 job_id=job.id,
                 status="failed",
-                message=f"Failed. Retrying in {delay}s (attempt {job.retry_count}/{job.max_retries}). Error: {error_msg}"
+                message=f"Attempt {job.retry_count}/{job.max_retries} failed. "
+                        f"Retrying in {delay}s ({strategy} backoff). Error: {error_msg}"
             ))
-            logger.info(f"Job {job.id} will be retried at {job.run_at}")
+            logger.info(f"Job {job.id} retry {job.retry_count}/{job.max_retries} in {delay}s")
         else:
-            # Max retries exceeded — move to Dead Letter Queue
+            # Permanently failed — move to DLQ
             job.status = "failed"
-            job.updated_at = datetime.now(timezone.utc)
-
+            job.updated_at = now
             session.add(JobLog(
                 job_id=job.id,
                 status="failed",
-                message=f"Max retries ({job.max_retries}) exceeded. Job moved to DLQ. Error: {error_msg}"
+                message=f"Permanently failed after {job.max_retries} retries. Error: {error_msg}"
             ))
 
-            # Write to DLQ — check for existing entry first
-            existing_dlq = await session.execute(
+            existing = await session.execute(
                 select(DeadLetterQueue).filter(DeadLetterQueue.job_id == job.id)
             )
-            if not existing_dlq.scalars().first():
-                dlq_entry = DeadLetterQueue(
+            if not existing.scalars().first():
+                session.add(DeadLetterQueue(
                     job_id=job.id,
                     payload=job.payload,
                     reason=f"Max retries ({job.max_retries}) exceeded. Last error: {error_msg}"
-                )
-                session.add(dlq_entry)
-
-            logger.error(f"Job {job.id} permanently failed after {job.max_retries} retries — added to DLQ.")
+                ))
+            logger.error(f"Job {job.id} added to DLQ after {job.max_retries} retries")
 
         await session.commit()

@@ -38,7 +38,13 @@ export default function Queues() {
   const onSubmit = async (data) => {
     setCreating(true);
     try {
-      await queuesAPI.create({ name: data.name, project_id: parseInt(data.project_id) });
+      await queuesAPI.create({
+        name: data.name,
+        project_id: parseInt(data.project_id),
+        priority: data.priority || 'normal',
+        concurrency_limit: parseInt(data.concurrency_limit) || 5,
+        retry_policy: data.retry_policy || 'exponential',
+      });
       reset(); setShowForm(false); fetchAll();
     } catch (err) {
       setError(err.response?.data?.detail || 'Failed to create queue.');
@@ -88,7 +94,27 @@ export default function Queues() {
               </select>
               {errors.project_id && <p className="text-error text-xs mt-1">Project required</p>}
             </div>
-            <div className="flex gap-3 md:col-span-2">
+            <div>
+              <label className="block text-sm font-medium text-text-secondary mb-1.5">Priority</label>
+              <select {...register('priority')} className="glass-input w-full">
+                <option value="normal">Normal</option>
+                <option value="high">High</option>
+                <option value="low">Low</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-text-secondary mb-1.5">Concurrency Limit</label>
+              <input {...register('concurrency_limit')} type="number" min="1" max="50" defaultValue={5} className="glass-input w-full" />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-text-secondary mb-1.5">Retry Policy</label>
+              <select {...register('retry_policy')} className="glass-input w-full">
+                <option value="exponential">Exponential Backoff</option>
+                <option value="linear">Linear</option>
+                <option value="fixed">Fixed</option>
+              </select>
+            </div>
+            <div className="flex gap-3 md:col-span-2 items-end">
               <button type="submit" disabled={creating} className="glass-btn glass-btn-primary text-sm">
                 {creating ? 'Creating...' : 'Create Queue'}
               </button>

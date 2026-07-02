@@ -1,16 +1,18 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy import func
 from typing import List
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 from app.config.database import get_db
-from app.models import Worker, Job
+from app.models import Worker, Job, User
 from app.auth.deps import get_current_user
-from app.models import User
 
 router = APIRouter()
+
+HEARTBEAT_TIMEOUT = 30  # seconds — worker is considered offline if no heartbeat
 
 
 class WorkerResponse(BaseModel):
@@ -33,19 +35,32 @@ async def list_workers(
     result = await db.execute(select(Worker))
     workers = result.scalars().all()
 
-    # Attach running job counts to each worker
+    now = datetime.now(timezone.utc)
     output = []
     for w in workers:
-        running = await db.execute(
-            select(Job).filter(Job.worker_id == w.id, Job.status.in_(["running", "claimed"]))
-        )
-        count = len(running.scalars().all())
+        # Auto-mark stale workers as offline
+        heartbeat = w.last_heartbeat
+        if heartbeat:
+            # Make timezone-aware if naive
+            if heartbeat.tzinfo is None:
+                heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+            if (now - heartbeat).total_seconds() > HEARTBEAT_TIMEOUT and w.status == "active":
+                w.status = "offline"
+                await db.commit()
+
+        running = (await db.execute(
+            select(func.count(Job.id)).filter(
+                Job.worker_id == w.id,
+                Job.status.in_(["running", "claimed"])
+            )
+        )).scalar() or 0
+
         output.append(WorkerResponse(
             id=w.id,
             name=w.name,
             status=w.status,
             created_at=w.created_at,
-            running_jobs=count,
-            last_heartbeat=w.created_at,  # Use created_at as proxy for heartbeat
+            running_jobs=running,
+            last_heartbeat=w.last_heartbeat,
         ))
     return output

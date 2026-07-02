@@ -68,6 +68,7 @@ export const workersAPI = {
 // --- Stats (Dashboard) ---
 export const statsAPI = {
   getDashboard: () => api.get('/api/stats/'),
+  getCharts: () => api.get('/api/stats/charts'),
 };
 
 // --- Logs ---

@@ -1,20 +1,24 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   AreaChart, Area, BarChart, Bar,
   PieChart, Pie, Cell, LineChart, Line,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
 } from 'recharts';
+import { statsAPI } from '../services/api';
 
 const COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4'];
 
 const CustomTooltip = ({ active, payload, label }) => {
   if (active && payload && payload.length) {
     return (
-      <div className="glass-panel px-3 py-2 text-sm border-accent/30">
-        <p className="text-text-secondary mb-1">{label}</p>
+      <div style={{
+        background: 'rgba(15,15,15,0.95)', border: '1px solid #262626',
+        borderRadius: '8px', padding: '8px 12px', fontSize: '12px'
+      }}>
+        <p style={{ color: '#94a3b8', marginBottom: 4 }}>{label}</p>
         {payload.map((p, i) => (
-          <p key={i} style={{ color: p.color }} className="font-semibold">
-            {p.name}: {p.value}
+          <p key={i} style={{ color: p.color, fontWeight: 600 }}>
+            {p.name}: {p.value}{p.unit || ''}
           </p>
         ))}
       </div>
@@ -23,12 +27,37 @@ const CustomTooltip = ({ active, payload, label }) => {
   return null;
 };
 
-// Job Throughput - Area Chart
-export function ThroughputChart({ data }) {
-  const chartData = data?.length ? data : Array.from({ length: 12 }, (_, i) => ({
-    time: `${i + 1}:00`,
-    completed: Math.floor(Math.random() * 80 + 20),
-    failed: Math.floor(Math.random() * 10),
+// Hook to fetch real chart data
+function useChartData() {
+  const [data, setData] = useState(null);
+
+  useEffect(() => {
+    const fetch = async () => {
+      try {
+        const res = await statsAPI.getCharts();
+        setData(res.data);
+      } catch {
+        // stay null — charts will use fallback data
+      }
+    };
+    fetch();
+    const interval = setInterval(fetch, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  return data;
+}
+
+// Shared chart data context via prop drilling from parent
+// Each chart also works standalone with fallback data
+
+export function ThroughputChart({ data: propData }) {
+  const liveData = useChartData();
+  const raw = propData || liveData?.throughput;
+  const chartData = raw?.length ? raw : Array.from({ length: 12 }, (_, i) => ({
+    time: `${String(i + 1).padStart(2, '0')}:00`,
+    completed: 0,
+    failed: 0,
   }));
 
   return (
@@ -56,19 +85,19 @@ export function ThroughputChart({ data }) {
   );
 }
 
-// Queue Distribution - Pie Chart
-export function QueueDistributionChart({ data }) {
-  const chartData = data?.length ? data : [
-    { name: 'Email', value: 35 },
-    { name: 'Payment', value: 25 },
-    { name: 'Export', value: 20 },
-    { name: 'Image', value: 20 },
-  ];
+export function QueueDistributionChart({ data: propData }) {
+  const liveData = useChartData();
+  const raw = propData || liveData?.queue_distribution;
+  const chartData = raw?.length ? raw : [{ name: 'No data', value: 1 }];
 
   return (
     <ResponsiveContainer width="100%" height={200}>
       <PieChart>
-        <Pie data={chartData} cx="50%" cy="50%" innerRadius={55} outerRadius={80} paddingAngle={4} dataKey="value">
+        <Pie
+          data={chartData} cx="50%" cy="50%"
+          innerRadius={55} outerRadius={80}
+          paddingAngle={4} dataKey="value"
+        >
           {chartData.map((_, index) => (
             <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} opacity={0.9} />
           ))}
@@ -80,13 +109,11 @@ export function QueueDistributionChart({ data }) {
   );
 }
 
-// Worker Utilization - Bar Chart
-export function WorkerUtilizationChart({ data }) {
-  const chartData = data?.length ? data : [
-    { worker: 'W-01', cpu: 72, mem: 55 },
-    { worker: 'W-02', cpu: 45, mem: 38 },
-    { worker: 'W-03', cpu: 89, mem: 67 },
-    { worker: 'W-04', cpu: 23, mem: 20 },
+export function WorkerUtilizationChart({ data: propData }) {
+  const liveData = useChartData();
+  const raw = propData || liveData?.worker_utilization;
+  const chartData = raw?.length ? raw : [
+    { worker: 'W-01', cpu: 0, mem: 0 },
   ];
 
   return (
@@ -104,11 +131,12 @@ export function WorkerUtilizationChart({ data }) {
   );
 }
 
-// Failure Rate - Line Chart
-export function FailureRateChart({ data }) {
-  const chartData = data?.length ? data : Array.from({ length: 7 }, (_, i) => ({
+export function FailureRateChart({ data: propData }) {
+  const liveData = useChartData();
+  const raw = propData || liveData?.failure_rate;
+  const chartData = raw?.length ? raw : Array.from({ length: 7 }, (_, i) => ({
     day: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][i],
-    rate: parseFloat((Math.random() * 8 + 1).toFixed(1)),
+    rate: 0,
   }));
 
   return (
@@ -118,7 +146,10 @@ export function FailureRateChart({ data }) {
         <XAxis dataKey="day" tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} />
         <YAxis tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} unit="%" />
         <Tooltip content={<CustomTooltip />} />
-        <Line type="monotone" dataKey="rate" stroke="#ef4444" strokeWidth={2} dot={{ fill: '#ef4444', r: 4 }} name="Failure %" />
+        <Line
+          type="monotone" dataKey="rate" stroke="#ef4444"
+          strokeWidth={2} dot={{ fill: '#ef4444', r: 4 }} name="Failure %"
+        />
       </LineChart>
     </ResponsiveContainer>
   );
