@@ -276,7 +276,7 @@ MIT License — free to use, modify, and distribute.
 
 ## Author
 
-Built with care by **Karan Piramanayagam**
+Built with care by **karanstark**
 
 > "Write clean queues. Ship clean jobs."
 
