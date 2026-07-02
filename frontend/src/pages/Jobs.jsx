@@ -30,7 +30,9 @@ export default function Jobs() {
         allQueues.push(...qRes.data);
         for (const q of qRes.data) {
           const jRes = await jobsAPI.list(q.id);
-          allJobs.push(...jRes.data.map(j => ({ ...j, queue_name: q.name })));
+          // Handle both paginated and plain array responses
+          const items = jRes.data?.items ?? jRes.data ?? [];
+          allJobs.push(...items.map(j => ({ ...j, queue_name: q.name })));
         }
       }
       setQueues(allQueues);

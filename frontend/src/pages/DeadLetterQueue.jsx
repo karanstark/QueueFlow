@@ -25,7 +25,7 @@ export default function DeadLetterQueue() {
           const qRes = await queuesAPI.list(p.id);
           for (const q of qRes.data) {
             const jRes = await jobsAPI.list(q.id);
-            failed.push(...jRes.data.filter(j => j.status === 'failed').map(j => ({ ...j, queue_name: q.name })));
+            failed.push(...(jRes.data?.items ?? jRes.data ?? []).filter(j => j.status === 'failed').map(j => ({ ...j, queue_name: q.name })));
           }
         }
         setDlqJobs(failed);

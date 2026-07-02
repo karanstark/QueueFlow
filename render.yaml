@@ -9,5 +9,16 @@ services:
     envVars:
       - key: SECRET_KEY
         generateValue: true
+      # Option 1: SQLite (simple, good for demo)
       - key: DATABASE_URL
         value: sqlite+aiosqlite:///./queueflow.db
+      # Option 2: PostgreSQL (production-grade, uncomment and set value)
+      # - key: DATABASE_URL
+      #   fromDatabase:
+      #     name: queueflow-db
+      #     property: connectionString
+
+# Uncomment below to provision a free PostgreSQL database on Render
+# databases:
+#   - name: queueflow-db
+#     plan: free

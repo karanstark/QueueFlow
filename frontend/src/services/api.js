@@ -54,7 +54,9 @@ export const queuesAPI = {
 
 // --- Jobs ---
 export const jobsAPI = {
-  list: (queueId) => api.get('/api/jobs/', { params: { queue_id: queueId } }),
+  list: (queueId, { status, priority, page = 1, pageSize = 50 } = {}) =>
+    api.get('/api/jobs/', { params: { queue_id: queueId, status, priority, page, page_size: pageSize } }),
+  get: (id) => api.get(`/api/jobs/${id}`),
   create: (data) => api.post('/api/jobs/', data),
   cancel: (id) => api.patch(`/api/jobs/${id}/cancel/`),
   retry: (id) => api.patch(`/api/jobs/${id}/retry/`),
