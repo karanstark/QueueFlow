@@ -15,16 +15,6 @@ QueueFlow is a full-stack distributed job queue system. Think of it as a lightwe
 
 ---
 
-## Screenshots
-
-| Dashboard | Jobs | Dead Letter Queue |
-|-----------|------|-------------------|
-| Real-time metrics & charts | Filter jobs by status | Review & retry failed jobs |
-
-> The UI uses a dark glassmorphism design with live polling every 5 seconds.
-
----
-
 ## Features
 
 ### Core
